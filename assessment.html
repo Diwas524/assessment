@@ -1069,7 +1069,7 @@ let recaptchaVerifier = null;
 
 function ensureRecaptcha(){
   if(recaptchaVerifier) return recaptchaVerifier;
-  recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptchaContainer", { size:"normal" }, auth);
+  recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptchaContainer", { size:"normal" });
   return recaptchaVerifier;
 }
 
