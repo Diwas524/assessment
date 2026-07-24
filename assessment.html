@@ -220,41 +220,32 @@ input[type=text],input[type=date],textarea,select{font-size:16px;padding:13px 14
 
 <main>
 
-  <!-- PHONE VERIFICATION SCREEN -->
+  <!-- PHONE + PIN SIGN-IN SCREEN -->
   <div id="phoneScreen" class="center-card">
     <div class="step-eyebrow" style="justify-content:center;display:flex">Pre-Assessment Questionnaire</div>
-    <h1>Let's Verify It's You</h1>
-    <p>We use your phone number to securely save your progress so you can pick up right where you left off — on any device.</p>
+    <h1>Welcome — Let's Get Started</h1>
+    <p>Enter your phone number and 4-digit PIN. If you've started this before, we'll pick up right where you left off. If this is your first time, we'll set up a new profile for you.</p>
     <div class="field" style="text-align:left;margin-top:24px">
       <label class="field-label">Mobile Phone Number</label>
       <div style="display:flex;gap:8px;align-items:stretch">
         <span style="display:flex;align-items:center;padding:0 14px;border:1.5px solid var(--border);border-radius:10px;background:var(--mint-pale);color:var(--forest);font-weight:600;font-size:.9rem;white-space:nowrap">+1</span>
         <input type="text" id="phoneInput" placeholder="555 123 4567" autocomplete="tel-national" inputmode="numeric" maxlength="14" style="flex:1">
       </div>
-      <div class="field-hint">10-digit US number. We'll text you a 6-digit code.</div>
+      <div class="field-hint">10-digit US number.</div>
+    </div>
+    <div class="field" style="text-align:left">
+      <label class="field-label">4-Digit PIN</label>
+      <input type="text" id="pinInput" placeholder="••••" autocomplete="off" inputmode="numeric" maxlength="4" style="letter-spacing:.35em;text-align:center">
+      <div class="field-hint">Already started? Enter the PIN you created last time.</div>
     </div>
     <div id="phoneError" class="field-error-msg hide" style="justify-content:center"></div>
+    <div id="pinRetryActions" class="hide" style="margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+      <button class="btn btn-ghost" id="pinRetryBtn">Try Again</button>
+      <button class="btn btn-ghost" id="pinRestartBtn">Restart Application</button>
+    </div>
     <div style="margin-top:20px">
-      <button class="btn btn-primary" id="sendCodeBtn" style="width:100%;justify-content:center">Text Me a Code</button>
+      <button class="btn btn-primary" id="continueBtn" style="width:100%;justify-content:center">Continue</button>
     </div>
-    <div id="recaptchaContainer" style="margin-top:14px;display:flex;justify-content:center"></div>
-  </div>
-
-  <!-- OTP ENTRY SCREEN -->
-  <div id="otpScreen" class="center-card hide">
-    <div class="step-eyebrow" style="justify-content:center;display:flex">Verify Your Number</div>
-    <h1>Enter the Code We Texted You</h1>
-    <p id="otpSentTo" style="font-size:.85rem"></p>
-    <div class="field" style="text-align:left;margin-top:20px">
-      <label class="field-label">6-Digit Code</label>
-      <input type="text" id="otpInput" placeholder="123456" inputmode="numeric" maxlength="6">
-    </div>
-    <div id="otpError" class="field-error-msg hide" style="justify-content:center"></div>
-    <div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn btn-ghost" id="otpBackBtn">← Use a different number</button>
-      <button class="btn btn-primary" id="verifyOtpBtn" style="flex:1;justify-content:center">Verify &amp; Continue</button>
-    </div>
-    <p style="margin-top:16px"><button class="btn btn-ghost" id="resendOtpBtn" style="font-size:.78rem;padding:8px 14px">Resend code</button></p>
   </div>
 
   <!-- WELCOME BACK (existing saved progress found) -->
@@ -313,7 +304,6 @@ input[type=text],input[type=date],textarea,select{font-size:16px;padding:13px 14
      FIREBASE + PDF-LIB
      ============================================================= -->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -333,18 +323,25 @@ const firebaseConfig = {
   measurementId: "G-HVBPBFFJ31"
 };
 firebase.initializeApp(firebaseConfig);
-const auth = firebase.auth();
 const db = firebase.firestore();
 const storage = firebase.storage();
 
-let currentUser = null;      // signed-in Firebase user (via phone OTP)
+let currentPhone = null;     // the +1XXXXXXXXXX number the person signed in with
 let docRef = null;           // Firestore doc for this user's assessment
 let autosaveTimer = null;
-let confirmationResult = null;
 
 function phoneDocId(phone){
   // Firestore doc IDs can't contain "/"; sanitize the phone number for use as a key.
   return phone.replace(/[^0-9+]/g,"");
+}
+
+/* Simple one-way hash for the 4-digit PIN so it isn't stored in plain text.
+   This is a lightweight deterrent, not cryptographic-grade security — a
+   4-digit PIN has limited entropy no matter how it's hashed. */
+async function hashPin(pin){
+  const enc = new TextEncoder().encode("nch-pin-salt-"+pin);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
 }
 
 function setSaveStatus(text){
@@ -362,7 +359,7 @@ function scheduleAutosave(){
       await docRef.set({
         answers, currentStep,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        phone: currentUser ? currentUser.phoneNumber : null,
+        phone: currentPhone || null,
         submitted: false
       }, { merge:true });
       setSaveStatus("Saved ✓");
@@ -943,7 +940,7 @@ function attachFieldListeners(){
         const file = valid[i];
         const placeholder = placeholders[i];
         try{
-          const path = `assessments/${phoneDocId(currentUser.phoneNumber)}/attachments/${Date.now()}-${file.name}`;
+          const path = `assessments/${phoneDocId(currentPhone)}/attachments/${Date.now()}-${file.name}`;
           const ref = storage.ref().child(path);
           await ref.put(file);
           const url = await ref.getDownloadURL();
@@ -1063,108 +1060,111 @@ document.getElementById("nextBtn").addEventListener("click",()=>{
 document.getElementById("backBtn").disabled = true;
 
 /* ============================================================
-   PHONE NUMBER + OTP (MFA) SIGN-IN, VIA FIREBASE AUTH
+   PHONE NUMBER + 4-DIGIT PIN SIGN-IN (NO SMS / NO PHONE VERIFICATION)
+   Looks the phone number up directly in Firestore:
+     - number found + PIN matches  -> resume/load that profile
+     - number found + PIN wrong    -> show error, offer retry or restart
+     - number not found            -> create a brand-new profile
    ============================================================ */
-let recaptchaVerifier = null;
-
-function ensureRecaptcha(){
-  if(recaptchaVerifier) return recaptchaVerifier;
-  recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptchaContainer", { size:"normal" });
-  return recaptchaVerifier;
-}
-
 function showPhoneError(msg){
   const el = document.getElementById("phoneError");
   el.textContent = msg;
   el.classList.remove("hide");
 }
-function showOtpError(msg){
-  const el = document.getElementById("otpError");
-  el.textContent = msg;
-  el.classList.remove("hide");
+function hidePhoneError(){
+  document.getElementById("phoneError").classList.add("hide");
+}
+function showPinRetryActions(show){
+  document.getElementById("pinRetryActions").classList.toggle("hide", !show);
 }
 
-document.getElementById("sendCodeBtn").addEventListener("click",async ()=>{
-  document.getElementById("phoneError").classList.add("hide");
+document.getElementById("continueBtn").addEventListener("click", handlePhonePinSubmit);
+
+async function handlePhonePinSubmit(){
+  hidePhoneError();
+  showPinRetryActions(false);
+
   const digits = document.getElementById("phoneInput").value.replace(/\D/g,"");
+  const pin = document.getElementById("pinInput").value.trim();
+
   if(digits.length!==10){
     showPhoneError("Please enter a valid 10-digit phone number.");
     return;
   }
-  const phone = "+1"+digits;
-  const btn = document.getElementById("sendCodeBtn");
-  btn.disabled = true; btn.textContent = "Sending…";
-  try{
-    const verifier = ensureRecaptcha();
-    confirmationResult = await auth.signInWithPhoneNumber(phone, verifier);
-    document.getElementById("otpSentTo").textContent = `We sent a 6-digit code to (${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}.`;
-    document.getElementById("phoneScreen").classList.add("hide");
-    document.getElementById("otpScreen").classList.remove("hide");
-  }catch(err){
-    console.error(err);
-    showPhoneError("We couldn't send a code to that number. Please check it and try again.");
-  }finally{
-    btn.disabled = false; btn.textContent = "Text Me a Code";
-  }
-});
-
-document.getElementById("resendOtpBtn").addEventListener("click",()=>{
-  document.getElementById("sendCodeBtn").click();
-});
-
-document.getElementById("otpBackBtn").addEventListener("click",()=>{
-  document.getElementById("otpScreen").classList.add("hide");
-  document.getElementById("phoneScreen").classList.remove("hide");
-});
-
-document.getElementById("verifyOtpBtn").addEventListener("click",async ()=>{
-  document.getElementById("otpError").classList.add("hide");
-  const code = document.getElementById("otpInput").value.trim();
-  if(!/^\d{6}$/.test(code)){
-    showOtpError("Enter the 6-digit code we texted you.");
+  if(!/^\d{4}$/.test(pin)){
+    showPhoneError("Please enter a 4-digit PIN.");
     return;
   }
-  const btn = document.getElementById("verifyOtpBtn");
-  btn.disabled = true; btn.textContent = "Verifying…";
+
+  const phone = "+1"+digits;
+  const btn = document.getElementById("continueBtn");
+  btn.disabled = true; btn.textContent = "Checking…";
+
   try{
-    const result = await confirmationResult.confirm(code);
-    currentUser = result.user;
-    await loadOrStartAssessment();
+    const id = phoneDocId(phone);
+    const ref = db.collection("assessments").doc(id);
+    const snap = await ref.get();
+    const pinHash = await hashPin(pin);
+
+    if(snap.exists && snap.data()){
+      const data = snap.data();
+      if(data.pinHash !== pinHash){
+        showPhoneError("That PIN didn't match this phone number. Please try again, or restart to use a different number.");
+        showPinRetryActions(true);
+        return;
+      }
+      // PIN matches an existing profile — resume it.
+      currentPhone = phone;
+      docRef = ref;
+      if(!data.submitted){
+        answers = data.answers || {};
+        currentStep = data.currentStep || 0;
+        document.getElementById("phoneScreen").classList.add("hide");
+        document.getElementById("welcomeBackScreen").classList.remove("hide");
+      } else {
+        answers = {};
+        currentStep = 0;
+        document.getElementById("phoneScreen").classList.add("hide");
+        document.getElementById("intro").classList.remove("hide");
+      }
+    } else {
+      // No profile for this number yet — create a brand-new one.
+      currentPhone = phone;
+      docRef = ref;
+      answers = {};
+      currentStep = 0;
+      await docRef.set({
+        phone: currentPhone,
+        pinHash,
+        answers,
+        currentStep,
+        submitted:false,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      document.getElementById("phoneScreen").classList.add("hide");
+      document.getElementById("intro").classList.remove("hide");
+    }
   }catch(err){
     console.error(err);
-    showOtpError("That code didn't match. Please try again.");
+    showPhoneError("Something went wrong checking that number. Please try again.");
   }finally{
-    btn.disabled = false; btn.textContent = "Verify & Continue";
-  }
-});
-
-/* After phone verification: look up any saved progress in Firestore for
-   this phone number, and resume from there — or start fresh. */
-async function loadOrStartAssessment(){
-  document.getElementById("otpScreen").classList.add("hide");
-  const id = phoneDocId(currentUser.phoneNumber);
-  docRef = db.collection("assessments").doc(id);
-  const snap = await docRef.get();
-  if(snap.exists && snap.data() && !snap.data().submitted){
-    const data = snap.data();
-    answers = data.answers || {};
-    currentStep = data.currentStep || 0;
-    document.getElementById("welcomeBackScreen").classList.remove("hide");
-  } else {
-    answers = {};
-    currentStep = 0;
-    document.getElementById("intro").classList.remove("hide");
+    btn.disabled = false; btn.textContent = "Continue";
   }
 }
 
-/* If the browser already has an active Firebase Auth session (e.g. the
-   person reopened the page), skip straight past the phone/OTP screens. */
-auth.onAuthStateChanged(user=>{
-  if(user && !currentUser){
-    currentUser = user;
-    document.getElementById("phoneScreen").classList.add("hide");
-    loadOrStartAssessment();
-  }
+/* "Try Again": stay on the same screen, just clear the PIN so they can retry. */
+document.getElementById("pinRetryBtn").addEventListener("click",()=>{
+  hidePhoneError();
+  showPinRetryActions(false);
+  const pinField = document.getElementById("pinInput");
+  pinField.value = "";
+  pinField.focus();
+});
+
+/* "Restart Application": clear everything and reload fresh. */
+document.getElementById("pinRestartBtn").addEventListener("click",()=>{
+  window.location.reload();
 });
 
 /* ============================================================
@@ -1306,8 +1306,8 @@ async function submitForm(){
     statusEl.textContent = "✅ Your PDF is ready to download.";
     statusEl.classList.add("ready");
 
-    if(docRef && currentUser){
-      const path = `assessments/${phoneDocId(currentUser.phoneNumber)}/final-assessment.pdf`;
+    if(docRef && currentPhone){
+      const path = `assessments/${phoneDocId(currentPhone)}/final-assessment.pdf`;
       const ref = storage.ref().child(path);
       await ref.put(blob);
       const pdfUrl = await ref.getDownloadURL();
