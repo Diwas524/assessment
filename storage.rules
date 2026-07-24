@@ -1,0 +1,27 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // assessments/+15551234567/attachments/...  and .../final-assessment.pdf
+    // Only the verified owner of that phone number can read/write their folder,
+    // and only PDF files under 20MB may be uploaded.
+    match /assessments/{phoneId}/{allPaths=**} {
+      allow read: if request.auth != null
+                  && request.auth.token.phone_number == phoneId;
+
+      allow create, update: if request.auth != null
+                  && request.auth.token.phone_number == phoneId
+                  && request.resource.contentType == 'application/pdf'
+                  && request.resource.size < 20 * 1024 * 1024;
+
+      allow delete: if request.auth != null
+                  && request.auth.token.phone_number == phoneId;
+    }
+
+    // Deny everything else by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
