@@ -280,11 +280,14 @@ input[type=text],input[type=date],textarea,select{font-size:16px;padding:13px 14
     <h1>Thank You for Sharing Their Story</h1>
     <p>We will review your questionnaire and any documents you've provided before the assessment.</p>
     <p>Please remember: this questionnaire is not itself the completed nursing assessment. Information you've shared will be reviewed, clarified, and combined with the assessor's professional evaluation to complete the formal assessment.</p>
-    <div style="margin-top:28px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
-      <button class="btn btn-primary" id="downloadPdfBtn">⬇ Download PDF (with attachments)</button>
+    <div class="pdf-status" id="pdfStatus" style="margin-top:24px;font-size:.92rem"></div>
+    <div class="info-box" style="margin-top:24px;text-align:left">
+      <p style="margin-bottom:8px"><b>📞 Phone:</b> <a href="tel:+18013696018" style="color:var(--forest);font-weight:600">(801) 369-6018</a></p>
+      <p style="margin-bottom:8px"><b>✉️ Email:</b> <a href="mailto:neighborcarehome@gmail.com" style="color:var(--forest);font-weight:600">neighborcarehome@gmail.com</a></p>
+      <p style="margin-bottom:8px"><b>📍 Location:</b> Vancouver, WA 98661</p>
+      <p style="margin-bottom:0"><b>🕐 Office Hours:</b> Monday – Saturday, 8 AM – 6 PM</p>
     </div>
-    <div class="pdf-status" id="pdfStatus"></div>
-    <p style="font-size:.76rem;margin-top:20px;color:var(--sub)">A confirmation has been noted for your records. If you don't hear from us within one business day, please call us at <a href="tel:+18013696018" style="color:var(--forest);font-weight:600">(801) 369-6018</a> or email <a href="mailto:neighborcarehome@gmail.com" style="color:var(--forest);font-weight:600">neighborcarehome@gmail.com</a>.</p>
+    <p style="font-size:.76rem;margin-top:20px;color:var(--sub)">If you don't hear from us within one business day, please reach out using the contact information above.</p>
   </div>
 
 </main>
@@ -304,6 +307,7 @@ input[type=text],input[type=date],textarea,select{font-size:16px;padding:13px 14
      FIREBASE + PDF-LIB
      ============================================================= -->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -323,8 +327,22 @@ const firebaseConfig = {
   measurementId: "G-HVBPBFFJ31"
 };
 firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
 const db = firebase.firestore();
 const storage = firebase.storage();
+
+/* This app no longer verifies phone numbers via SMS — but Firestore/Storage
+   security rules typically still require request.auth != null. Anonymous
+   Auth satisfies that requirement invisibly, with no phone/SMS involved. */
+let anonAuthReady = new Promise((resolve, reject)=>{
+  auth.onAuthStateChanged(user=>{
+    if(user){ resolve(user); }
+  });
+  auth.signInAnonymously().catch(err=>{
+    console.error("Anonymous sign-in failed:", err);
+    reject(err);
+  });
+});
 
 let currentPhone = null;     // the +1XXXXXXXXXX number the person signed in with
 let docRef = null;           // Firestore doc for this user's assessment
@@ -1101,6 +1119,7 @@ async function handlePhonePinSubmit(){
   btn.disabled = true; btn.textContent = "Checking…";
 
   try{
+    await anonAuthReady; // make sure we're signed in (anonymously) before touching Firestore
     const id = phoneDocId(phone);
     const ref = db.collection("assessments").doc(id);
     const snap = await ref.get();
@@ -1279,6 +1298,16 @@ async function buildFinalMergedPdf(){
   return merged.save();
 }
 
+/* Converts a Blob to a base64 string (no data: prefix) for email attachments. */
+function blobToBase64(blob){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onloadend = ()=> resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function submitForm(){
   document.getElementById("formCard").classList.add("hide");
   document.getElementById("navbar").style.display="none";
@@ -1287,30 +1316,20 @@ async function submitForm(){
   window.scrollTo({top:0,behavior:"smooth"});
 
   const statusEl = document.getElementById("pdfStatus");
-  const downloadBtn = document.getElementById("downloadPdfBtn");
-  downloadBtn.disabled = true;
-  statusEl.textContent = "⏳ Preparing your PDF (combining your answers and attachments)…";
+  statusEl.textContent = "⏳ Preparing and delivering your assessment (combining your answers and attachments)…";
 
   try{
     const mergedBytes = await buildFinalMergedPdf();
     const blob = new Blob([mergedBytes],{type:"application/pdf"});
-    const blobUrl = URL.createObjectURL(blob);
     const namePart = (answers.resident_name||"assessment").replace(/[^a-z0-9]/gi,"-").toLowerCase();
     const fileName = `neighbor-care-assessment-${namePart}.pdf`;
 
-    downloadBtn.onclick = ()=>{
-      const a = document.createElement("a");
-      a.href = blobUrl; a.download = fileName; a.click();
-    };
-    downloadBtn.disabled = false;
-    statusEl.textContent = "✅ Your PDF is ready to download.";
-    statusEl.classList.add("ready");
-
+    let pdfUrl = null;
     if(docRef && currentPhone){
       const path = `assessments/${phoneDocId(currentPhone)}/final-assessment.pdf`;
       const ref = storage.ref().child(path);
       await ref.put(blob);
-      const pdfUrl = await ref.getDownloadURL();
+      pdfUrl = await ref.getDownloadURL();
       await docRef.set({
         answers, currentStep, submitted:true,
         submittedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -1318,9 +1337,31 @@ async function submitForm(){
       }, { merge:true });
       setSaveStatus("Submitted ✓");
     }
+
+    /* Email the combined PDF to the care team. This writes to a "mail"
+       collection watched by the Firebase "Trigger Email" extension
+       (https://extensions.dev/extensions/firebase/firestore-send-email),
+       which must be installed and configured on this Firebase project
+       for delivery to actually go out — this app does not run its own
+       mail server. The PDF is attached as base64. */
+    const base64Pdf = await blobToBase64(blob);
+    await db.collection("mail").add({
+      to: ["neighborcarehome@gmail.com"],
+      message: {
+        subject: `New Pre-Assessment Questionnaire — ${answers.resident_name || "Unnamed Resident"}`,
+        text: `A new pre-assessment questionnaire has been submitted.\n\nResident: ${answers.resident_name || "(not provided)"}\nSubmitted by phone: ${currentPhone || "(unknown)"}\n${pdfUrl ? "Stored PDF: "+pdfUrl : ""}\n\nThe combined PDF (answers + attachments) is included with this email.`,
+        attachments: [
+          { filename: fileName, content: base64Pdf, encoding: "base64" }
+        ]
+      },
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+
+    statusEl.textContent = "✅ Your assessment has been delivered to our care team. They'll be in touch with you soon.";
+    statusEl.classList.add("ready");
   }catch(err){
     console.error(err);
-    statusEl.textContent = "⚠ Something went wrong preparing your PDF. Please try again, or call us and we'll help.";
+    statusEl.textContent = "⚠ Something went wrong delivering your assessment. Please try again, or contact us directly using the information below.";
   }
 }
 
